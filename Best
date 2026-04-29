@@ -1,0 +1,957 @@
+--[[
+    ╔══════════════════════════════════════════════════╗
+    ║   Ocean Scout v4 — Full Suite                   ║
+    ║   • Recursive BillboardGui fish scanner          ║
+    ║   • Teleport panel + Server Hop                  ║
+    ║   • Auto Target — follow + ProximityPrompt catch ║
+    ╚══════════════════════════════════════════════════╝
+--]]
+
+local Players         = game:GetService("Players")
+local TweenService    = game:GetService("TweenService")
+local TeleportService = game:GetService("TeleportService")
+local HttpService     = game:GetService("HttpService")
+local RunService      = game:GetService("RunService")
+local LocalPlayer     = Players.LocalPlayer
+local PlayerGui       = LocalPlayer:WaitForChild("PlayerGui")
+
+if PlayerGui:FindFirstChild("OceanScoutGUI") then
+    PlayerGui.OceanScoutGUI:Destroy()
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name            = "OceanScoutGUI"
+ScreenGui.ResetOnSpawn    = false
+ScreenGui.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent          = PlayerGui
+
+-- ══════════════════════════════════════════════════════════════════════════
+--  THEME
+-- ══════════════════════════════════════════════════════════════════════════
+local T = {
+    BG_PANEL  = Color3.fromRGB(12,  24,  44),
+    BG_CARD   = Color3.fromRGB(16,  32,  58),
+    BG_HEADER = Color3.fromRGB(10,  20,  38),
+    CYAN      = Color3.fromRGB( 60, 220, 230),
+    TEAL      = Color3.fromRGB( 30, 170, 190),
+    GOLD      = Color3.fromRGB(255, 200,  60),
+    MYTHICAL  = Color3.fromRGB(190,  90, 255),
+    DIVINE    = Color3.fromRGB( 80, 170, 255),
+    SECRET    = Color3.fromRGB(255,  80, 110),
+    LEGENDARY = Color3.fromRGB(255, 160,  30),
+    EXOTIC    = Color3.fromRGB(255, 120,  50),
+    EPIC      = Color3.fromRGB(160,  80, 255),
+    GREEN     = Color3.fromRGB( 60, 200, 100),
+    RED       = Color3.fromRGB(220,  60,  80),
+    TXT_WHITE = Color3.fromRGB(230, 240, 255),
+    TXT_DIM   = Color3.fromRGB(120, 150, 190),
+    LINE      = Color3.fromRGB( 20,  50,  80),
+}
+
+-- ══════════════════════════════════════════════════════════════════════════
+--  HELPERS
+-- ══════════════════════════════════════════════════════════════════════════
+local function Corner(p,r)
+    local c=Instance.new("UICorner"); c.CornerRadius=UDim.new(0,r or 8); c.Parent=p
+end
+local function Stroke(p,col,th)
+    local s=Instance.new("UIStroke"); s.Color=col or T.CYAN
+    s.Thickness=th or 1; s.Transparency=0.6; s.Parent=p
+end
+local function Gradient(p,c0,c1,rot)
+    local g=Instance.new("UIGradient")
+    g.Color=ColorSequence.new(c0,c1); g.Rotation=rot or 90; g.Parent=p
+end
+local function Label(props)
+    local l=Instance.new("TextLabel"); l.BackgroundTransparency=1
+    for k,v in pairs(props) do l[k]=v end; return l
+end
+local function Tween(obj,props,t)
+    TweenService:Create(obj,TweenInfo.new(t or 0.18,Enum.EasingStyle.Quad),props):Play()
+end
+local function Trim(s) return s and s:match("^%s*(.-)%s*$") or "" end
+
+-- ══════════════════════════════════════════════════════════════════════════
+--  RARITY SYSTEM
+-- ══════════════════════════════════════════════════════════════════════════
+local RARITY_RANK = {
+    common=1, uncommon=2, rare=3, epic=4,
+    legendary=5, mythical=6, exotic=7, divine=8, secret=9,
+}
+local LOW_RARITIES = { common=true, uncommon=true, rare=true }
+
+local function RarityKey(raw)
+    if not raw or raw=="" then return nil end
+    local tl=Trim(raw):lower()
+    if RARITY_RANK[tl] then return tl end
+    for k in pairs(RARITY_RANK) do
+        if tl:find(k,1,true) then return k end
+    end
+    return nil
+end
+
+local function RarityColor(key)
+    if key=="secret"    then return T.SECRET   end
+    if key=="divine"    then return T.DIVINE   end
+    if key=="mythical"  then return T.MYTHICAL end
+    if key=="legendary" then return T.LEGENDARY end
+    if key=="exotic"    then return T.EXOTIC   end
+    if key=="epic"      then return T.EPIC     end
+    return T.TXT_DIM
+end
+
+local function ToTitle(s)
+    if not s or s=="" then return "" end
+    return s:sub(1,1):upper()..s:sub(2):lower()
+end
+
+-- ══════════════════════════════════════════════════════════════════════════
+--  RECURSIVE BILLBOARD SCANNER
+--  Walks ALL descendants of workspace looking for BillboardGuis.
+--  For each billboard found, climbs up to the owning Model.
+--  Reads rarity/mutation from every TextLabel inside the billboard.
+--  Returns de-duplicated list of fish data with live model references.
+-- ══════════════════════════════════════════════════════════════════════════
+local function ReadBillboard(bbg)
+    local rarityRaw, mutationRaw = nil, "None"
+    for _, lbl in ipairs(bbg:GetDescendants()) do
+        if lbl:IsA("TextLabel") then
+            local nl = lbl.Name:lower()
+            local tv = Trim(lbl.Text)
+            local tl = tv:lower()
+            -- rarity: name match first (strongest), then text match
+            if not rarityRaw then
+                if nl=="rarity" or nl:find("rarity") then
+                    if tv~="" then rarityRaw=tv end
+                elseif RARITY_RANK[tl] then
+                    rarityRaw=tv
+                else
+                    for k in pairs(RARITY_RANK) do
+                        if tl:find(k,1,true) then rarityRaw=tv; break end
+                    end
+                end
+            end
+            -- mutation: name match
+            if nl=="mutations" or nl=="mutation" then
+                if tv~="" and tv~="None" then mutationRaw=tv end
+            end
+        end
+    end
+    return rarityRaw, mutationRaw
+end
+
+-- Find the ProximityPrompt inside a fish model (any depth)
+local function FindProximityPrompt(model)
+    for _, d in ipairs(model:GetDescendants()) do
+        if d:IsA("ProximityPrompt") then return d end
+    end
+    return nil
+end
+
+-- Get the best BasePart position for a model (for teleport / follow)
+local function GetModelPart(model)
+    return model:FindFirstChild("RootPart")
+        or model.PrimaryPart
+        or model:FindFirstChildWhichIsA("BasePart")
+end
+
+local function ScanWorkspaceForFish(filterFn)
+    local seen   = {}
+    local result = {}
+    local rarityCount = {}
+
+    for _, desc in ipairs(workspace:GetDescendants()) do
+        if not desc:IsA("BillboardGui") then continue end
+
+        -- climb to owning Model
+        local model = desc.Parent
+        while model and not model:IsA("Model") do
+            model = model.Parent
+        end
+        if not model or model==workspace then continue end
+        if seen[model] then continue end
+        seen[model] = true
+
+        local rarityRaw, mutationRaw = ReadBillboard(desc)
+        if not rarityRaw then continue end
+
+        local key = RarityKey(rarityRaw)
+        if not key then continue end
+
+        rarityCount[key] = (rarityCount[key] or 0) + 1
+
+        -- apply filter
+        if filterFn and not filterFn(key) then continue end
+
+        local part = GetModelPart(model)
+        if not part then continue end
+
+        table.insert(result, {
+            name       = model.Name,
+            rarityKey  = key,
+            rarityRaw  = rarityRaw,
+            mutation   = mutationRaw,
+            rank       = RARITY_RANK[key] or 0,
+            model      = model,
+            part       = part,
+            prompt     = FindProximityPrompt(model),
+        })
+    end
+
+    table.sort(result, function(a,b) return a.rank > b.rank end)
+    return result, rarityCount
+end
+
+-- ══════════════════════════════════════════════════════════════════════════
+--  AUTO TARGET ENGINE
+--  Continuously follows the target fish model and fires its ProximityPrompt
+--  whenever within range. Handles fish that move around.
+-- ══════════════════════════════════════════════════════════════════════════
+local AutoTarget = {}
+AutoTarget.running      = false
+AutoTarget.connection   = nil   -- RunService connection
+AutoTarget.currentFish  = nil   -- current fish data table
+AutoTarget.targetKeys   = {}    -- set of rarity keys to auto-catch
+AutoTarget.statusFn     = nil   -- callback(text, color) for UI updates
+AutoTarget.scanInterval = 3     -- re-scan for new fish every N seconds
+AutoTarget.lastScan     = 0
+AutoTarget.catchDelay   = 0.4   -- seconds between prompt fires
+
+local FOLLOW_DIST  = 8   -- how close to get before firing prompt (studs)
+local PROMPT_RANGE = 12  -- fire prompt if within this range
+
+local function FirePrompt(prompt)
+    -- FireProximityPrompt triggers the server-side catch logic
+    local ok = pcall(function()
+        fireclickdetector and fireclickdetector(prompt)
+    end)
+    if not ok then
+        pcall(function()
+            prompt:InputHoldBegin()
+            task.delay(0.1, function() pcall(function() prompt:InputHoldEnd() end) end)
+        end)
+    end
+    -- Primary method: fire the proximity prompt directly
+    pcall(function()
+        fireproximityprompt(prompt)
+    end)
+end
+
+local function GetHRP()
+    local char = LocalPlayer.Character
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+local function GetHumanoid()
+    local char = LocalPlayer.Character
+    return char and char:FindFirstChildOfClass("Humanoid")
+end
+
+local function MoveToward(part)
+    local hum = GetHumanoid()
+    if hum and part and part.Parent then
+        hum:MoveTo(part.Position)
+    end
+end
+
+function AutoTarget:FindBestFish()
+    local hrp = GetHRP()
+    local filterFn = function(key) return self.targetKeys[key] end
+    local fish, _ = ScanWorkspaceForFish(filterFn)
+    if #fish == 0 then return nil end
+
+    -- pick closest alive fish that still has a prompt
+    if hrp then
+        table.sort(fish, function(a, b)
+            local pa = GetModelPart(a.model)
+            local pb = GetModelPart(b.model)
+            if not pa then return false end
+            if not pb then return true end
+            local da = (hrp.Position - pa.Position).Magnitude
+            local db = (hrp.Position - pb.Position).Magnitude
+            -- weight: closer + higher rarity wins
+            local scoreA = da - (a.rank * 10)
+            local scoreB = db - (b.rank * 10)
+            return scoreA < scoreB
+        end)
+    end
+
+    -- return first fish that has a live prompt
+    for _, f in ipairs(fish) do
+        if f.prompt and f.prompt.Parent then
+            -- re-find prompt in case model updated
+            f.prompt = FindProximityPrompt(f.model) or f.prompt
+            return f
+        end
+    end
+    return fish[1]  -- fallback even without prompt
+end
+
+function AutoTarget:Start(targetKeys, statusFn)
+    if self.running then self:Stop() end
+    self.running     = true
+    self.targetKeys  = targetKeys or {}
+    self.statusFn    = statusFn or function() end
+    self.lastScan    = 0
+    self.currentFish = nil
+
+    local lastFire = 0
+
+    self.connection = RunService.Heartbeat:Connect(function(dt)
+        if not self.running then return end
+
+        local now   = tick()
+        local hrp   = GetHRP()
+        if not hrp then return end
+
+        -- re-scan periodically or if current fish is gone
+        local fishGone = self.currentFish and (
+            not self.currentFish.model.Parent or
+            not GetModelPart(self.currentFish.model)
+        )
+
+        if fishGone or (now - self.lastScan) >= self.scanInterval then
+            self.lastScan    = now
+            self.currentFish = self:FindBestFish()
+            if self.currentFish then
+                self.statusFn(
+                    "Targeting: "..self.currentFish.name
+                    .." ["..ToTitle(self.currentFish.rarityKey).."]",
+                    RarityColor(self.currentFish.rarityKey)
+                )
+            else
+                self.statusFn("Scanning for fish…", T.TXT_DIM)
+            end
+        end
+
+        if not self.currentFish then return end
+
+        local fish  = self.currentFish
+        local fPart = GetModelPart(fish.model)
+        if not fPart then
+            self.currentFish = nil
+            return
+        end
+
+        local dist = (hrp.Position - fPart.Position).Magnitude
+
+        -- always walk toward the fish so we stay in range
+        if dist > FOLLOW_DIST then
+            MoveToward(fPart)
+        end
+
+        -- fire prompt when close enough and cooldown elapsed
+        if dist <= PROMPT_RANGE and (now - lastFire) >= self.catchDelay then
+            lastFire = now
+            local prompt = fish.prompt or FindProximityPrompt(fish.model)
+            if prompt and prompt.Parent then
+                FirePrompt(prompt)
+                self.statusFn(
+                    "⚡ Catching: "..fish.name,
+                    T.CYAN
+                )
+            else
+                -- no prompt found — just stay close, game may add it
+                self.statusFn(
+                    "Waiting: "..fish.name.." (no prompt yet)",
+                    T.GOLD
+                )
+            end
+        end
+    end)
+end
+
+function AutoTarget:Stop()
+    self.running = false
+    if self.connection then
+        self.connection:Disconnect()
+        self.connection = nil
+    end
+    self.currentFish = nil
+    -- stop humanoid movement
+    local hum = GetHumanoid()
+    if hum then pcall(function() hum:MoveTo(GetHRP().Position) end) end
+end
+
+-- ══════════════════════════════════════════════════════════════════════════
+--  SERVER HOP
+-- ══════════════════════════════════════════════════════════════════════════
+local hopRunning = false
+local PLACE_ID   = game.PlaceId
+
+local function GetRandomServer()
+    local url = string.format(
+        "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100",
+        PLACE_ID
+    )
+    local ok, result = pcall(function()
+        return HttpService:JSONDecode(game:HttpGet(url))
+    end)
+    if not ok or not result or not result.data then return nil end
+    local servers={}
+    for _, s in ipairs(result.data) do
+        if s.id~=game.JobId and s.playing < s.maxPlayers then
+            table.insert(servers, s)
+        end
+    end
+    if #servers==0 then return nil end
+    return servers[math.random(1,#servers)]
+end
+
+local function DoServerHop(statusFn)
+    if hopRunning then return end
+    hopRunning=true
+    statusFn("Fetching servers…", T.GOLD)
+    task.spawn(function()
+        local server=GetRandomServer()
+        if not server then
+            statusFn("No servers found!", T.RED)
+            task.wait(2); statusFn("Jump to a new server", T.TXT_DIM)
+            hopRunning=false; return
+        end
+        statusFn("Hopping…", T.CYAN)
+        task.wait(0.5)
+        local ok,err=pcall(function()
+            TeleportService:TeleportToPlaceInstance(PLACE_ID, server.id, LocalPlayer)
+        end)
+        if not ok then
+            statusFn("Failed: "..tostring(err):sub(1,24), T.RED)
+            task.wait(2); statusFn("Jump to a new server", T.TXT_DIM)
+            hopRunning=false
+        end
+    end)
+end
+
+-- ══════════════════════════════════════════════════════════════════════════
+--  PANEL / SCROLL BUILDERS
+-- ══════════════════════════════════════════════════════════════════════════
+local function MakePanel(title, icon, sizeX, sizeY, posX, posY)
+    local frame=Instance.new("Frame")
+    frame.Size=UDim2.new(0,sizeX,0,sizeY)
+    frame.Position=UDim2.new(0,posX,0,posY)
+    frame.BackgroundColor3=T.BG_PANEL; frame.BorderSizePixel=0
+    frame.Active=true; frame.Draggable=true; frame.ClipsDescendants=true
+    frame.Parent=ScreenGui; Corner(frame,12); Stroke(frame,T.CYAN,1)
+    Gradient(frame,Color3.fromRGB(12,26,48),Color3.fromRGB(7,15,28),160)
+
+    local hdr=Instance.new("Frame"); hdr.Size=UDim2.new(1,0,0,40)
+    hdr.BackgroundColor3=T.BG_HEADER; hdr.BorderSizePixel=0
+    hdr.ZIndex=2; hdr.Parent=frame; Corner(hdr,12)
+
+    local accent=Instance.new("Frame"); accent.Size=UDim2.new(1,0,0,1)
+    accent.Position=UDim2.new(0,0,1,-1); accent.BackgroundColor3=T.CYAN
+    accent.BackgroundTransparency=0.5; accent.BorderSizePixel=0; accent.Parent=hdr
+
+    Label{Size=UDim2.new(0,28,1,0),Position=UDim2.new(0,10,0,0),Text=icon,
+          TextColor3=T.CYAN,Font=Enum.Font.GothamBold,TextSize=18,ZIndex=3,Parent=hdr}
+    Label{Size=UDim2.new(1,-80,1,0),Position=UDim2.new(0,38,0,0),Text=title,
+          TextColor3=T.TXT_WHITE,Font=Enum.Font.GothamBold,TextSize=13,
+          TextXAlignment=Enum.TextXAlignment.Left,ZIndex=3,Parent=hdr}
+
+    local x=Instance.new("TextButton"); x.Size=UDim2.new(0,28,0,28)
+    x.Position=UDim2.new(1,-34,0,6); x.BackgroundColor3=Color3.fromRGB(60,20,30)
+    x.TextColor3=Color3.fromRGB(255,100,120); x.Text="✕"
+    x.Font=Enum.Font.GothamBold; x.TextSize=13; x.BorderSizePixel=0
+    x.ZIndex=4; x.Parent=hdr; Corner(x,6)
+    x.MouseButton1Click:Connect(function() frame.Visible=false end)
+    return frame
+end
+
+local function MakeScroll(parent, offsetY)
+    local s=Instance.new("ScrollingFrame")
+    s.Size=UDim2.new(1,-14,1,-(offsetY+8))
+    s.Position=UDim2.new(0,7,0,offsetY+4)
+    s.BackgroundTransparency=1; s.ScrollBarThickness=3
+    s.ScrollBarImageColor3=T.CYAN; s.ScrollBarImageTransparency=0.3
+    s.CanvasSize=UDim2.new(0,0,0,0); s.BorderSizePixel=0; s.Parent=parent
+    local l=Instance.new("UIListLayout"); l.Padding=UDim.new(0,6)
+    l.HorizontalAlignment=Enum.HorizontalAlignment.Center
+    l.SortOrder=Enum.SortOrder.LayoutOrder; l.Parent=s
+    l:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        s.CanvasSize=UDim2.new(0,0,0,l.AbsoluteContentSize.Y+10)
+    end)
+    return s
+end
+
+-- ══════════════════════════════════════════════════════════════════════════
+--  TELEPORT PANEL
+-- ══════════════════════════════════════════════════════════════════════════
+local TeleportPanel = MakePanel("TELEPORTS","⊕",220,400,12,60)
+local tpScroll      = MakeScroll(TeleportPanel,44)
+
+local function MakeTpButton(icon, labelText, callback)
+    local btn=Instance.new("TextButton"); btn.Size=UDim2.new(1,-4,0,40)
+    btn.BackgroundColor3=T.BG_CARD; btn.Text=""; btn.BorderSizePixel=0
+    btn.Parent=tpScroll; Corner(btn,8); Stroke(btn,T.LINE,1)
+
+    local ic=Instance.new("Frame"); ic.Size=UDim2.new(0,28,0,28)
+    ic.Position=UDim2.new(0,7,0.5,-14)
+    ic.BackgroundColor3=Color3.fromRGB(18,46,72)
+    ic.BorderSizePixel=0; ic.Parent=btn; Corner(ic,8)
+    Label{Size=UDim2.new(1,0,1,0),Text=icon,TextColor3=T.CYAN,
+          Font=Enum.Font.GothamBold,TextSize=15,Parent=ic,ZIndex=2}
+    Label{Size=UDim2.new(1,-50,1,0),Position=UDim2.new(0,42,0,0),
+          Text=labelText,TextColor3=T.TXT_WHITE,Font=Enum.Font.Gotham,TextSize=13,
+          TextXAlignment=Enum.TextXAlignment.Left,
+          TextTruncate=Enum.TextTruncate.AtEnd,Parent=btn,ZIndex=2}
+    local arrow=Label{Size=UDim2.new(0,16,1,0),Position=UDim2.new(1,-18,0,0),
+          Text="›",TextColor3=T.TEAL,Font=Enum.Font.GothamBold,TextSize=18,
+          Parent=btn,ZIndex=2}
+
+    btn.MouseEnter:Connect(function()
+        Tween(btn,{BackgroundColor3=Color3.fromRGB(20,48,80)})
+        Tween(arrow,{TextColor3=T.CYAN})
+    end)
+    btn.MouseLeave:Connect(function()
+        Tween(btn,{BackgroundColor3=T.BG_CARD})
+        Tween(arrow,{TextColor3=T.TEAL})
+    end)
+    btn.MouseButton1Click:Connect(callback)
+end
+
+local FishZonesFolder = workspace:FindFirstChild("Game") and workspace.Game:FindFirstChild("FishZones")
+if FishZonesFolder then
+    for _, item in ipairs(FishZonesFolder:GetChildren()) do
+        local pos
+        if item:IsA("BasePart") then pos=item.Position
+        elseif item:IsA("Model") and item.PrimaryPart then pos=item.PrimaryPart.Position
+        else continue end
+        MakeTpButton("🐟", item.Name, function()
+            local root=LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if root then root.CFrame=CFrame.new(pos+Vector3.new(0,4,0)) end
+        end)
+    end
+else
+    MakeTpButton("✖","FishZones not found",function()end)
+end
+
+local sep1=Instance.new("Frame"); sep1.Size=UDim2.new(1,-4,0,1)
+sep1.BackgroundColor3=T.CYAN; sep1.BackgroundTransparency=0.7
+sep1.BorderSizePixel=0; sep1.Parent=tpScroll
+
+local remoteEvent=workspace:FindFirstChild("Network") and workspace.Network:FindFirstChild("Teleport-RemoteEvent")
+if remoteEvent then
+    MakeTpButton("🐠","Aquarium",  function() remoteEvent:FireServer("Aquarium") end)
+    MakeTpButton("💰","Sell Area", function() remoteEvent:FireServer("Sell")     end)
+else
+    MakeTpButton("✖","Remote missing",function()end)
+end
+
+-- separator before hop
+local sep2=Instance.new("Frame"); sep2.Size=UDim2.new(1,-4,0,1)
+sep2.BackgroundColor3=T.CYAN; sep2.BackgroundTransparency=0.7
+sep2.BorderSizePixel=0; sep2.Parent=tpScroll
+
+-- server hop button
+local hopBtn=Instance.new("TextButton"); hopBtn.Size=UDim2.new(1,-4,0,46)
+hopBtn.BackgroundColor3=Color3.fromRGB(10,60,40); hopBtn.Text=""
+hopBtn.BorderSizePixel=0; hopBtn.Parent=tpScroll
+Corner(hopBtn,10); Stroke(hopBtn,T.GREEN,1)
+Gradient(hopBtn,Color3.fromRGB(10,70,45),Color3.fromRGB(6,40,28),135)
+local hopIc=Instance.new("Frame"); hopIc.Size=UDim2.new(0,30,0,30)
+hopIc.Position=UDim2.new(0,8,0.5,-15)
+hopIc.BackgroundColor3=Color3.fromRGB(12,90,55)
+hopIc.BorderSizePixel=0; hopIc.Parent=hopBtn; Corner(hopIc,8)
+Label{Size=UDim2.new(1,0,1,0),Text="⇄",TextColor3=T.GREEN,
+      Font=Enum.Font.GothamBold,TextSize=18,Parent=hopIc,ZIndex=2}
+Label{Size=UDim2.new(1,-54,0,20),Position=UDim2.new(0,46,0,5),
+      Text="SERVER HOP",TextColor3=T.GREEN,Font=Enum.Font.GothamBold,
+      TextSize=13,TextXAlignment=Enum.TextXAlignment.Left,Parent=hopBtn,ZIndex=2}
+local hopSubLbl=Label{Size=UDim2.new(1,-54,0,16),Position=UDim2.new(0,46,0,24),
+      Text="Jump to a new server",TextColor3=T.TXT_DIM,Font=Enum.Font.Gotham,
+      TextSize=10,TextXAlignment=Enum.TextXAlignment.Left,Parent=hopBtn,ZIndex=2}
+hopBtn.MouseEnter:Connect(function() Tween(hopBtn,{BackgroundColor3=Color3.fromRGB(14,80,52)}) end)
+hopBtn.MouseLeave:Connect(function() Tween(hopBtn,{BackgroundColor3=Color3.fromRGB(10,60,40)}) end)
+hopBtn.MouseButton1Click:Connect(function()
+    DoServerHop(function(msg,col)
+        hopSubLbl.Text=msg; hopSubLbl.TextColor3=col or T.TXT_DIM
+    end)
+end)
+
+-- ══════════════════════════════════════════════════════════════════════════
+--  AUTO TARGET PANEL
+-- ══════════════════════════════════════════════════════════════════════════
+local AutoPanel  = MakePanel("AUTO TARGET","🎯",260,370,556,60)
+local autoScroll = MakeScroll(AutoPanel, 44)
+
+-- rarity toggle rows
+-- each rarity gets a toggle chip — enabled = highlighted
+local rarityOrder = {
+    "secret","divine","mythical","exotic","legendary","epic","rare","uncommon","common"
+}
+local rarityToggles = {}   -- key → { enabled, btnRef, labelRef }
+
+-- status bar at top of scroll
+local atStatusFrame=Instance.new("Frame")
+atStatusFrame.Size=UDim2.new(1,-4,0,44)
+atStatusFrame.BackgroundColor3=T.BG_CARD
+atStatusFrame.BorderSizePixel=0; atStatusFrame.LayoutOrder=0
+atStatusFrame.Parent=autoScroll; Corner(atStatusFrame,8)
+
+local atStatusLbl=Label{
+    Size=UDim2.new(1,-12,1,0),Position=UDim2.new(0,8,0,0),
+    Text="Auto Target is OFF",TextColor3=T.TXT_DIM,
+    Font=Enum.Font.GothamBold,TextSize=12,
+    TextXAlignment=Enum.TextXAlignment.Left,
+    TextWrapped=true,Parent=atStatusFrame,ZIndex=2,
+}
+
+-- separator label
+local function SectionLabel(txt, order)
+    local f=Instance.new("Frame"); f.Size=UDim2.new(1,-4,0,22)
+    f.BackgroundTransparency=1; f.BorderSizePixel=0
+    f.LayoutOrder=order; f.Parent=autoScroll
+    Label{Size=UDim2.new(1,0,1,0),Text=txt,TextColor3=T.TXT_DIM,
+          Font=Enum.Font.GothamBold,TextSize=10,
+          TextXAlignment=Enum.TextXAlignment.Left,Parent=f}
+end
+
+SectionLabel("  TARGET RARITIES", 1)
+
+-- rarity grid (2 per row)
+local gridFrame=Instance.new("Frame"); gridFrame.Size=UDim2.new(1,-4,0,0)
+gridFrame.BackgroundTransparency=1; gridFrame.BorderSizePixel=0
+gridFrame.LayoutOrder=2; gridFrame.AutomaticSize=Enum.AutomaticSize.Y
+gridFrame.Parent=autoScroll
+
+local gridLayout=Instance.new("UIGridLayout")
+gridLayout.CellSize=UDim2.new(0.5,-4,0,32)
+gridLayout.CellPaddingSize=UDim2.new(0,4,0,4)
+gridLayout.HorizontalAlignment=Enum.HorizontalAlignment.Left
+gridLayout.Parent=gridFrame
+
+for _, key in ipairs(rarityOrder) do
+    local rc=RarityColor(key)
+    local isOn = not LOW_RARITIES[key]  -- default: epic+ enabled
+
+    local chip=Instance.new("TextButton")
+    chip.Size=UDim2.new(0,1,0,1)  -- grid controls actual size
+    chip.BackgroundColor3=isOn and Color3.fromRGB(16,40,68) or Color3.fromRGB(14,24,40)
+    chip.Text=""; chip.BorderSizePixel=0
+    chip.Parent=gridFrame; Corner(chip,6)
+    if isOn then Stroke(chip,rc,1) else Stroke(chip,T.LINE,1) end
+
+    local dot=Instance.new("Frame"); dot.Size=UDim2.new(0,8,0,8)
+    dot.Position=UDim2.new(0,8,0.5,-4)
+    dot.BackgroundColor3=isOn and rc or T.LINE
+    dot.BorderSizePixel=0; dot.Parent=chip; Corner(dot,99)
+
+    local lbl=Label{Size=UDim2.new(1,-22,1,0),Position=UDim2.new(0,22,0,0),
+          Text=ToTitle(key),TextColor3=isOn and rc or T.TXT_DIM,
+          Font=Enum.Font.GothamBold,TextSize=11,
+          TextXAlignment=Enum.TextXAlignment.Left,Parent=chip,ZIndex=2}
+
+    rarityToggles[key]={enabled=isOn, btn=chip, lbl=lbl, dot=dot, color=rc}
+
+    chip.MouseButton1Click:Connect(function()
+        local t=rarityToggles[key]
+        t.enabled=not t.enabled
+        local on=t.enabled
+        local col=on and t.color or T.LINE
+        Tween(chip,{BackgroundColor3=on and Color3.fromRGB(16,40,68) or Color3.fromRGB(14,24,40)})
+        Tween(dot,{BackgroundColor3=col})
+        lbl.TextColor3=on and t.color or T.TXT_DIM
+        -- update UIStroke
+        local st=chip:FindFirstChildOfClass("UIStroke")
+        if st then st.Color=col end
+    end)
+end
+
+SectionLabel("  SETTINGS", 3)
+
+-- catch delay slider row
+local delayRow=Instance.new("Frame"); delayRow.Size=UDim2.new(1,-4,0,38)
+delayRow.BackgroundColor3=T.BG_CARD; delayRow.BorderSizePixel=0
+delayRow.LayoutOrder=4; delayRow.Parent=autoScroll; Corner(delayRow,8)
+
+Label{Size=UDim2.new(0,120,1,0),Position=UDim2.new(0,10,0,0),
+      Text="Catch delay (s)",TextColor3=T.TXT_DIM,Font=Enum.Font.Gotham,
+      TextSize=11,TextXAlignment=Enum.TextXAlignment.Left,Parent=delayRow}
+
+local delayValLbl=Label{Size=UDim2.new(0,30,1,0),Position=UDim2.new(1,-36,0,0),
+      Text="0.4",TextColor3=T.CYAN,Font=Enum.Font.GothamBold,
+      TextSize=12,Parent=delayRow,ZIndex=2}
+
+-- simple +/- buttons since no Slider in ScreenGui easily
+local function SmallBtn(txt, xPos, cb)
+    local b=Instance.new("TextButton"); b.Size=UDim2.new(0,26,0,26)
+    b.Position=UDim2.new(0,xPos,0.5,-13)
+    b.BackgroundColor3=Color3.fromRGB(20,50,80)
+    b.TextColor3=T.CYAN; b.Text=txt
+    b.Font=Enum.Font.GothamBold; b.TextSize=14
+    b.BorderSizePixel=0; b.Parent=delayRow; Corner(b,6)
+    b.MouseButton1Click:Connect(cb); return b
+end
+
+local delayVal=0.4
+SmallBtn("-",130,function()
+    delayVal=math.max(0.1, math.floor((delayVal-0.1)*10+0.5)/10)
+    delayValLbl.Text=string.format("%.1f",delayVal)
+    AutoTarget.catchDelay=delayVal
+end)
+SmallBtn("+",160,function()
+    delayVal=math.min(3.0, math.floor((delayVal+0.1)*10+0.5)/10)
+    delayValLbl.Text=string.format("%.1f",delayVal)
+    AutoTarget.catchDelay=delayVal
+end)
+
+SectionLabel("", 5)  -- spacer
+
+-- START / STOP button
+local startBtn=Instance.new("TextButton")
+startBtn.Size=UDim2.new(1,-4,0,46)
+startBtn.BackgroundColor3=Color3.fromRGB(14,90,80)
+startBtn.Text=""; startBtn.BorderSizePixel=0
+startBtn.LayoutOrder=6; startBtn.Parent=autoScroll
+Corner(startBtn,10); Stroke(startBtn,T.GREEN,1)
+Gradient(startBtn,Color3.fromRGB(14,100,85),Color3.fromRGB(8,55,45),135)
+
+local startIc=Instance.new("Frame"); startIc.Size=UDim2.new(0,30,0,30)
+startIc.Position=UDim2.new(0,8,0.5,-15)
+startIc.BackgroundColor3=Color3.fromRGB(16,120,90)
+startIc.BorderSizePixel=0; startIc.Parent=startBtn; Corner(startIc,8)
+local startIcLbl=Label{Size=UDim2.new(1,0,1,0),Text="▶",TextColor3=T.GREEN,
+      Font=Enum.Font.GothamBold,TextSize=16,Parent=startIc,ZIndex=2}
+local startMainLbl=Label{Size=UDim2.new(1,-54,0,22),Position=UDim2.new(0,46,0,4),
+      Text="START AUTO TARGET",TextColor3=T.GREEN,Font=Enum.Font.GothamBold,
+      TextSize=12,TextXAlignment=Enum.TextXAlignment.Left,Parent=startBtn,ZIndex=2}
+local startSubLbl=Label{Size=UDim2.new(1,-54,0,16),Position=UDim2.new(0,46,0,24),
+      Text="Select rarities above first",TextColor3=T.TXT_DIM,
+      Font=Enum.Font.Gotham,TextSize=10,
+      TextXAlignment=Enum.TextXAlignment.Left,Parent=startBtn,ZIndex=2}
+
+local isAutoRunning=false
+
+local function SetAutoUI(running)
+    isAutoRunning=running
+    if running then
+        startMainLbl.Text="STOP AUTO TARGET"
+        startIcLbl.Text="■"
+        Tween(startBtn,{BackgroundColor3=Color3.fromRGB(80,20,20)})
+        Tween(startIc, {BackgroundColor3=Color3.fromRGB(120,24,24)})
+        startMainLbl.TextColor3=T.RED
+        startIcLbl.TextColor3=T.RED
+        local st=startBtn:FindFirstChildOfClass("UIStroke")
+        if st then st.Color=T.RED end
+    else
+        startMainLbl.Text="START AUTO TARGET"
+        startIcLbl.Text="▶"
+        Tween(startBtn,{BackgroundColor3=Color3.fromRGB(14,90,80)})
+        Tween(startIc, {BackgroundColor3=Color3.fromRGB(16,120,90)})
+        startMainLbl.TextColor3=T.GREEN
+        startIcLbl.TextColor3=T.GREEN
+        local st=startBtn:FindFirstChildOfClass("UIStroke")
+        if st then st.Color=T.GREEN end
+        atStatusLbl.Text="Auto Target is OFF"
+        atStatusLbl.TextColor3=T.TXT_DIM
+        Tween(atStatusFrame,{BackgroundColor3=T.BG_CARD})
+    end
+end
+
+startBtn.MouseButton1Click:Connect(function()
+    if isAutoRunning then
+        AutoTarget:Stop()
+        SetAutoUI(false)
+    else
+        -- build target keys from toggles
+        local keys={}
+        local count=0
+        for key, t in pairs(rarityToggles) do
+            if t.enabled then keys[key]=true; count=count+1 end
+        end
+        if count==0 then
+            startSubLbl.Text="Enable at least one rarity!"
+            startSubLbl.TextColor3=T.RED
+            task.delay(2,function()
+                startSubLbl.Text="Select rarities above first"
+                startSubLbl.TextColor3=T.TXT_DIM
+            end)
+            return
+        end
+        SetAutoUI(true)
+        AutoTarget:Start(keys, function(msg, col)
+            atStatusLbl.Text=msg
+            atStatusLbl.TextColor3=col or T.TXT_DIM
+            if col==T.CYAN then
+                Tween(atStatusFrame,{BackgroundColor3=Color3.fromRGB(10,40,60)})
+            elseif col and col~=T.TXT_DIM then
+                Tween(atStatusFrame,{BackgroundColor3=Color3.fromRGB(20,36,56)})
+            end
+        end)
+        startSubLbl.Text="Running — targeting "..count.." rarity tier(s)"
+        startSubLbl.TextColor3=T.TXT_DIM
+    end
+end)
+
+-- ══════════════════════════════════════════════════════════════════════════
+--  FISH SCANNER PANEL
+-- ══════════════════════════════════════════════════════════════════════════
+local ScanPanel  = MakePanel("LIVE FISH SCANNER","◈",300,420,244,60)
+local fishScroll = MakeScroll(ScanPanel, 100)
+
+local toolRow=Instance.new("Frame"); toolRow.Size=UDim2.new(1,-14,0,52)
+toolRow.Position=UDim2.new(0,7,0,44); toolRow.BackgroundTransparency=1
+toolRow.Parent=ScanPanel
+
+local statusLbl=Label{
+    Size=UDim2.new(1,0,0,16),Position=UDim2.new(0,0,0,0),
+    Text="Press SCAN (epic+) or ALL",TextColor3=T.TXT_DIM,
+    Font=Enum.Font.Gotham,TextSize=10,
+    TextXAlignment=Enum.TextXAlignment.Left,Parent=toolRow,
+}
+local debugLbl=Label{
+    Size=UDim2.new(1,0,0,14),Position=UDim2.new(0,0,0,17),
+    Text="",TextColor3=Color3.fromRGB(80,200,120),
+    Font=Enum.Font.Gotham,TextSize=9,
+    TextXAlignment=Enum.TextXAlignment.Left,
+    TextTruncate=Enum.TextTruncate.AtEnd,Parent=toolRow,
+}
+
+local function Pill(text,color,xPos,xSize)
+    local b=Instance.new("TextButton"); b.Size=UDim2.new(0,xSize,0,26)
+    b.Position=UDim2.new(0,xPos,1,-26); b.BackgroundColor3=color
+    b.TextColor3=T.TXT_WHITE; b.Text=text; b.Font=Enum.Font.GothamBold
+    b.TextSize=11; b.BorderSizePixel=0; b.Parent=toolRow; Corner(b,6)
+    return b
+end
+local scanPill=Pill("⟳  SCAN",Color3.fromRGB(14,90,80), 0,  80)
+local allPill =Pill("ALL",    Color3.fromRGB(30,55,85), 84, 44)
+
+local function BuildFishCards(showHighOnly)
+    for _, c in ipairs(fishScroll:GetChildren()) do
+        if not c:IsA("UIListLayout") then c:Destroy() end
+    end
+    statusLbl.Text="Scanning workspace…"; debugLbl.Text=""
+
+    local filterFn = showHighOnly and function(k) return not LOW_RARITIES[k] end or nil
+    local data, rarityCount = ScanWorkspaceForFish(filterFn)
+
+    local parts={}
+    for k,n in pairs(rarityCount) do table.insert(parts, ToTitle(k)..":"..n) end
+    table.sort(parts); debugLbl.Text=#parts>0 and table.concat(parts," ") or "None found"
+
+    if #data==0 then
+        statusLbl.Text="Nothing found"
+        Label{Size=UDim2.new(1,-8,0,80),
+              Text=showHighOnly
+                  and "No Epic+ fish.\nAll rarities: "..debugLbl.Text
+                  or  "No BillboardGui fish found.",
+              TextColor3=T.TXT_DIM,Font=Enum.Font.Gotham,
+              TextSize=11,TextWrapped=true,Parent=fishScroll}
+        return
+    end
+
+    statusLbl.Text=(showHighOnly and "Epic+: " or "All: ")..#data.." fish"
+
+    for i, fish in ipairs(data) do
+        local rc=RarityColor(fish.rarityKey)
+        local card=Instance.new("Frame"); card.Size=UDim2.new(1,-4,0,56)
+        card.BackgroundColor3=T.BG_CARD; card.BorderSizePixel=0
+        card.LayoutOrder=i; card.Parent=fishScroll; Corner(card,10)
+
+        local stripe=Instance.new("Frame"); stripe.Size=UDim2.new(0,3,1,-12)
+        stripe.Position=UDim2.new(0,0,0,6); stripe.BackgroundColor3=rc
+        stripe.BorderSizePixel=0; stripe.Parent=card; Corner(stripe,2)
+
+        Label{Size=UDim2.new(0.55,0,0,22),Position=UDim2.new(0,12,0,7),
+              Text=fish.name,TextColor3=T.TXT_WHITE,Font=Enum.Font.GothamBold,
+              TextSize=13,TextXAlignment=Enum.TextXAlignment.Left,
+              TextTruncate=Enum.TextTruncate.AtEnd,Parent=card,ZIndex=2}
+
+        local badge=Instance.new("Frame"); badge.Size=UDim2.new(0,74,0,18)
+        badge.Position=UDim2.new(0,12,0,31); badge.BackgroundColor3=rc
+        badge.BackgroundTransparency=0.75; badge.BorderSizePixel=0
+        badge.Parent=card; badge.ZIndex=2; Corner(badge,4)
+        Label{Size=UDim2.new(1,0,1,0),Text=fish.rarityRaw:upper(),
+              TextColor3=rc,Font=Enum.Font.GothamBold,TextSize=9,
+              Parent=badge,ZIndex=3}
+
+        if fish.mutation~="None" and fish.mutation~="" then
+            Label{Size=UDim2.new(0,100,0,18),Position=UDim2.new(0,90,0,31),
+                  Text="✦ "..fish.mutation,TextColor3=T.GOLD,
+                  Font=Enum.Font.Gotham,TextSize=10,
+                  TextXAlignment=Enum.TextXAlignment.Left,
+                  Parent=card,ZIndex=2}
+        end
+
+        -- GO teleport button
+        local go=Instance.new("TextButton"); go.Size=UDim2.new(0,52,0,32)
+        go.Position=UDim2.new(1,-114,0.5,-16)
+        go.BackgroundColor3=Color3.fromRGB(16,60,90); go.TextColor3=T.CYAN
+        go.Text="▶ GO"; go.Font=Enum.Font.GothamBold; go.TextSize=11
+        go.BorderSizePixel=0; go.Parent=card; go.ZIndex=3
+        Corner(go,7); Stroke(go,T.CYAN,1)
+
+        -- TARGET button (single fish auto-catch)
+        local tgt=Instance.new("TextButton"); tgt.Size=UDim2.new(0,52,0,32)
+        tgt.Position=UDim2.new(1,-58,0.5,-16)
+        tgt.BackgroundColor3=Color3.fromRGB(40,16,70); tgt.TextColor3=T.MYTHICAL
+        tgt.Text="🎯"; tgt.Font=Enum.Font.GothamBold; tgt.TextSize=14
+        tgt.BorderSizePixel=0; tgt.Parent=card; tgt.ZIndex=3
+        Corner(tgt,7); Stroke(tgt,T.MYTHICAL,1)
+
+        local modelRef=fish.model; local partRef=fish.part
+
+        go.MouseEnter:Connect(function() Tween(go,{BackgroundColor3=Color3.fromRGB(20,100,130)}) end)
+        go.MouseLeave:Connect(function() Tween(go,{BackgroundColor3=Color3.fromRGB(16,60,90)}) end)
+        go.MouseButton1Click:Connect(function()
+            local hrp=LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if not hrp then return end
+            local pos
+            if partRef and partRef.Parent then pos=partRef.Position
+            elseif modelRef and modelRef.Parent then
+                local p=modelRef.PrimaryPart or modelRef:FindFirstChildWhichIsA("BasePart")
+                if p then pos=p.Position end
+            end
+            if pos then hrp.CFrame=CFrame.new(pos+Vector3.new(0,5,0)) end
+        end)
+
+        tgt.MouseEnter:Connect(function() Tween(tgt,{BackgroundColor3=Color3.fromRGB(60,20,100)}) end)
+        tgt.MouseLeave:Connect(function() Tween(tgt,{BackgroundColor3=Color3.fromRGB(40,16,70)}) end)
+        tgt.MouseButton1Click:Connect(function()
+            -- single-fish auto-target: locks onto just this fish's rarity key
+            local keys={[fish.rarityKey]=true}
+            if isAutoRunning then AutoTarget:Stop() end
+            SetAutoUI(true)
+            AutoTarget:Start(keys, function(msg,col)
+                atStatusLbl.Text=msg; atStatusLbl.TextColor3=col or T.TXT_DIM
+                if col==T.CYAN then
+                    Tween(atStatusFrame,{BackgroundColor3=Color3.fromRGB(10,40,60)})
+                end
+            end)
+            -- switch to auto panel to show status
+            AutoPanel.Visible=true
+        end)
+
+        card.MouseEnter:Connect(function() Tween(card,{BackgroundColor3=Color3.fromRGB(20,40,68)}) end)
+        card.MouseLeave:Connect(function() Tween(card,{BackgroundColor3=T.BG_CARD}) end)
+    end
+end
+
+scanPill.MouseButton1Click:Connect(function() BuildFishCards(true)  end)
+allPill.MouseButton1Click:Connect(function()  BuildFishCards(false) end)
+
+-- ══════════════════════════════════════════════════════════════════════════
+--  GLOBAL TOGGLE PILL
+-- ══════════════════════════════════════════════════════════════════════════
+local ToggleBtn=Instance.new("TextButton")
+ToggleBtn.Size=UDim2.new(0,130,0,36)
+ToggleBtn.Position=UDim2.new(0,12,1,-52)
+ToggleBtn.BackgroundColor3=T.BG_PANEL
+ToggleBtn.TextColor3=T.CYAN; ToggleBtn.Text="◈  OCEAN SCOUT"
+ToggleBtn.Font=Enum.Font.GothamBold; ToggleBtn.TextSize=11
+ToggleBtn.BorderSizePixel=0; ToggleBtn.Parent=ScreenGui
+Corner(ToggleBtn,18); Stroke(ToggleBtn,T.CYAN,1)
+Gradient(ToggleBtn,Color3.fromRGB(12,24,44),Color3.fromRGB(8,36,58),135)
+
+local panelsVisible=true
+ToggleBtn.MouseButton1Click:Connect(function()
+    panelsVisible=not panelsVisible
+    TeleportPanel.Visible=panelsVisible
+    ScanPanel.Visible=panelsVisible
+    AutoPanel.Visible=panelsVisible
+    ToggleBtn.Text=panelsVisible and "◈  OCEAN SCOUT" or "◈  SHOW"
+end)
+
+-- initial scan
+BuildFishCards(true)
